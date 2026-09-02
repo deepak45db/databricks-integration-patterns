@@ -1,0 +1,29 @@
+# =============================================================================
+# Lakeflow pipeline (Pattern 2)
+# Docs: https://docs.databricks.com/aws/en/ldp/
+# =============================================================================
+resources:
+  pipelines:
+    orderhub_cdc_pipeline:
+      name: orderhub_customer_cdc_${bundle.target}
+      catalog: ${var.catalog}
+      schema: silver
+      # Serverless: no cluster sizing to get wrong, and AUTO CDC requires
+      # serverless or the Pro/Advanced editions.
+      serverless: true
+      # Triggered, not continuous. A dimension that changes hourly does not need
+      # continuous compute, and continuous roughly doubles the cost.
+      continuous: false
+      development: true      # set false in prod; keeps clusters alive between runs
+      photon: true
+      libraries:
+        - file:
+            path: ../src/p2_cdc_scd2_pipeline.py
+      configuration:
+        orderhub.catalog: ${var.catalog}
+      notifications:
+        - email_recipients:
+            - ${var.notification_email}
+          alerts:
+            - on-update-failure
+            - on-flow-failure

@@ -1,0 +1,123 @@
+# =============================================================================
+# Lakeflow Jobs (formerly Workflows)
+# Two jobs on purpose:
+#   orderhub_batch_integration_job - scheduled, patterns 1/2/4/6
+#   orderhub_streaming_job         - independent lifecycle, pattern 3
+# Never put an always-on stream inside a scheduled job.
+# =============================================================================
+resources:
+  jobs:
+
+    # ---------------------------------------------------------------------
+    orderhub_setup_job:
+      name: orderhub_setup_${bundle.target}
+      tags:
+        project: orderhub
+        pattern: setup
+      tasks:
+        - task_key: uc_setup
+          sql_task:
+            file:
+              path: ../setup/00_uc_setup.sql
+            warehouse_id: ${var.warehouse_id}
+        - task_key: sample_data
+          depends_on:
+            - task_key: uc_setup
+          spark_python_task:
+            python_file: ../setup/01_generate_sample_data.py
+            parameters: ["--catalog", "${var.catalog}"]
+          environment_key: default
+      environments:
+        - environment_key: default
+          spec:
+            client: "3"
+
+    # ---------------------------------------------------------------------
+    orderhub_batch_integration_job:
+      name: orderhub_batch_integration_${bundle.target}
+      tags:
+        project: orderhub
+        pattern: batch
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"   # 06:00 daily
+        timezone_id: America/New_York
+      email_notifications:
+        on_failure:
+          - ${var.notification_email}
+      # A run that has not finished in an hour is stuck, not slow.
+      timeout_seconds: 3600
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+
+      tasks:
+        - task_key: p1_batch_files
+          spark_python_task:
+            python_file: ../src/p1_batch_file_autoloader.py
+            parameters: ["--catalog", "${var.catalog}"]
+          environment_key: default
+          max_retries: 2
+          min_retry_interval_millis: 60000
+
+        - task_key: p2_cdc_pipeline
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.orderhub_cdc_pipeline.id}
+
+        - task_key: p4_api_pull
+          spark_python_task:
+            python_file: ../src/p4_api_incremental_pull.py
+            parameters: ["--catalog", "${var.catalog}"]
+          environment_key: default
+          max_retries: 3
+
+        - task_key: quality_gate
+          depends_on:
+            - task_key: p1_batch_files
+            - task_key: p2_cdc_pipeline
+            - task_key: p4_api_pull
+          sql_task:
+            file:
+              path: ../sql/p6_gold_and_delta_sharing.sql
+            warehouse_id: ${var.warehouse_id}
+
+        - task_key: refresh_share
+          depends_on:
+            - task_key: quality_gate
+          sql_task:
+            file:
+              path: ../sql/observability.sql
+            warehouse_id: ${var.warehouse_id}
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "3"
+            dependencies:
+              - requests
+
+    # ---------------------------------------------------------------------
+    orderhub_streaming_job:
+      name: orderhub_streaming_${bundle.target}
+      tags:
+        project: orderhub
+        pattern: streaming
+      # continuous: the job restarts the stream if it stops. Switch run_mode to
+      # "batch" and put it on a schedule when the SLA does not justify always-on.
+      continuous:
+        pause_status: PAUSED
+      tasks:
+        - task_key: p3_shipment_events
+          spark_python_task:
+            python_file: ../src/p3_streaming_events.py
+            parameters:
+              - "--catalog"
+              - "${var.catalog}"
+              - "--source_mode"
+              - "files"
+              - "--run_mode"
+              - "batch"
+          environment_key: default
+      environments:
+        - environment_key: default
+          spec:
+            client: "3"

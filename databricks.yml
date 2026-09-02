@@ -1,0 +1,53 @@
+# =============================================================================
+# Bundle root - Databricks Asset Bundles
+# (the docs now also call these Declarative Automation Bundles; same tool)
+# Docs: https://docs.databricks.com/aws/en/dev-tools/bundles/
+#
+#   databricks bundle validate
+#   databricks bundle deploy -t dev
+#   databricks bundle run -t dev orderhub_batch_integration_job
+# =============================================================================
+bundle:
+  name: orderhub-integration-patterns
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Target Unity Catalog catalog
+    default: orderhub_dev
+  notification_email:
+    description: Where job failures go
+    default: data-eng-alerts@example.com
+  warehouse_id:
+    description: SQL warehouse used by sql_task steps
+    default: "abcd1234efgh5678"
+
+# Everything gets tagged, so system.billing.usage can attribute spend per pattern.
+# Untagged resources are the reason cost reviews turn into archaeology.
+targets:
+  dev:
+    mode: development     # prefixes resources with your username, pauses schedules
+    default: true
+    workspace:
+      host: https://dbc-xxxxxxxx-xxxx.cloud.databricks.com
+    variables:
+      catalog: orderhub_dev
+
+  prod:
+    mode: production      # no prefixes, schedules live, deploys as a service principal
+    workspace:
+      host: https://dbc-yyyyyyyy-yyyy.cloud.databricks.com
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog: orderhub_prod
+    run_as:
+      # Production never runs as a person. When that person leaves, the pipeline
+      # does too.
+      service_principal_name: sp-orderhub-etl
+    permissions:
+      - level: CAN_VIEW
+        group_name: orderhub_analysts
+      - level: CAN_MANAGE
+        group_name: orderhub_engineers
